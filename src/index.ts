@@ -15,10 +15,17 @@ import { homedir } from "node:os";
 
 const execPromise = promisify(exec);
 
-function winRoamingBin(): string {
+async function winRoamingBin(): Promise<string> {
   // VS Code spawns MCP servers with a clean env (no APPDATA)
-  const base = process.env.APPDATA ?? path.join(homedir(), "AppData", "Roaming");
-  return path.join(base, "npm");
+  // Use actual npm prefix instead of assuming %APPDATA%\npm for nvm compatibility
+  try {
+    const result = await execPromise('npm config get prefix');
+    return result.stdout.trim();
+  } catch {
+    // Fallback to traditional roaming path if npm command fails
+    const base = process.env.APPDATA ?? path.join(homedir(), "AppData", "Roaming");
+    return path.join(base, "npm");
+  }
 }
 
 // Function to find tool paths during initialization
@@ -30,10 +37,14 @@ async function findToolPaths() {
   if (isWindows) {
     try {
       const npxPaths = (await execPromise('cmd.exe /c where npx.cmd')).stdout.trim().split('\n');
-      // Favor Program Files to get direct executable
-      const foundNpxPath = npxPaths.find(p => p.includes('Program Files'));
+      // Prefer Program Files, but fallback to any valid npx.cmd path for nvm compatibility
+      let foundNpxPath = npxPaths.find(p => p.includes('Program Files'));
       if (!foundNpxPath) {
-        throw new Error('Could not find npx.cmd in Program Files');
+        // Fallback to the first available npx.cmd path (supports nvm installations)
+        foundNpxPath = npxPaths[0];
+        if (!foundNpxPath) {
+          throw new Error('Could not find npx.cmd in any location');
+        }
       }
       npxPath = path.normalize(foundNpxPath).trim();
 
@@ -52,7 +63,7 @@ async function findToolPaths() {
 
   // Get npm bin directory for Windows desktop-commander.cmd
   const npmBin = isWindows
-    ? winRoamingBin()                                  // Use homedir() when VS Code strips env
+    ? await winRoamingBin()                            // Use actual npm prefix for nvm compatibility
     : path.dirname(npxPath);                           // same folder as npx on *nix
 
   process.env.DEEBO_NPM_BIN = npmBin;                 // <-- expose for later
@@ -171,10 +182,10 @@ server.tool(
         type: "text",
         text:
           `Session ${sessionId} started!\n\n` +
-          `Check out the GitHub for tips and best practices:\n` +
+          `Looking for resources? Ask your agent to read Deebo guide, or check out the Deebo GitHub:\n` +
           `https://github.com/snagasuri/deebo-prototype\n\n` +
           `Reminder: Deebo updates frequently.\n` +
-          `Run npx deebo-setup@latest or pull the latest from GitHub occasionally to get bug fixes and improvements!`
+          `Run npx deebo-setup@latest frequently for bug fixes and improvements!`
       }]
     };
   }
@@ -183,7 +194,7 @@ server.tool(
 // Register check tool - gets status of a debug session
 server.tool(
   "check",
-  "Retrieves the current status of a debugging session, providing a detailed pulse report. For in-progress sessions, the pulse includes the mother agent's current stage in the OODA loop, running scenario agents with their hypotheses, and any preliminary findings. For completed sessions, the pulse contains the final solution with a comprehensive explanation, relevant code changes, and outcome summaries from all scenario agents that contributed to the solution. Use this tool to monitor ongoing progress or retrieve the final validated fix.",
+  "Retrieves the current status of a debugging session, providing a detailed pulse report. For in-progress sessions, the pulse includes the mother agent's current stage in the OODA loop, running scenario agents with their hypotheses, and any preliminary findings. For completed sessions, the pulse contains the final solution with a comprehensive explanation, relevant code changes, and outcome summaries from all scenario agents that contributed to the solution. Use this tool to monitor ongoing progress or retrieve the final validated fix. In a short paragraph, Include the Mother agents status only if it's crashed or failing otherwise just skip over it and use the last activity and the last log message to summarize in one sentence what the mother agent did. Then describe scenario agents activity and hypotheses briefly ",
   {
     sessionId: z.string().describe("The session ID returned by the start tool when the debugging session was initiated")
   },
@@ -219,31 +230,12 @@ server.tool(
 
       const firstEvent = JSON.parse(motherLines[0]);
       const durationMs = Date.now() - new Date(firstEvent.timestamp).getTime();
-
-      // Add atomic log reading function
-      const readLogAtomically = async (logPath: string, maxRetries = 3): Promise<string> => {
-        for (let i = 0; i < maxRetries; i++) {
-          try {
-            const content = await readFile(logPath, 'utf8');
-            // Verify log entry completeness by checking for valid JSON and tags
-            const lines = content.split('\n').filter(Boolean);
-            if (lines.every(line => {
-              try {
-                JSON.parse(line);
-                return true;
-              } catch {
-                return false;
-              }
-            })) {
-              return content;
-            }
-          } catch (e) {
-            if (i === maxRetries - 1) throw e;
-            await new Promise(resolve => setTimeout(resolve, 100));
-          }
-        }
-        throw new Error('Failed to read log atomically');
-      };
+      const durationSeconds = Math.floor(durationMs / 1000);
+      const durationMinutes = Math.floor(durationSeconds / 60);
+      const remainingSeconds = durationSeconds % 60;
+      const durationStr = durationMinutes > 0
+        ? `${durationMinutes} minute${durationMinutes > 1 ? 's' : ''} ${remainingSeconds} second${remainingSeconds !== 1 ? 's' : ''}`
+        : `${durationSeconds} second${durationSeconds !== 1 ? 's' : ''}`;
 
       // Determine status by scanning for solution tag, cancellation, or errors
       let status = 'in_progress';
@@ -325,7 +317,7 @@ server.tool(
       function getScenarioStatus(scenarioId: string, pidMapping: Map<string, number>): string {
         const pid = pidMapping.get(scenarioId);
         if (!pid) return 'Unknown';
-        return terminatedPids.has(pid) ? 'Terminated' : 'Running';
+        return terminatedPids.has(pid) ? 'Terminated' : 'Investigating...';
       }
 
       // Build PID mapping from mother log
@@ -353,29 +345,51 @@ server.tool(
         }
       }
 
-      // build clickable links with absolute paths
+      // build links with absolute paths
       const normalizedPath = sessionDir.split(path.sep).join('/'); // Normalize to forward slashes
       const projectId = normalizedPath.split("/memory-bank/")[1].split("/")[0];
       const progressMdPath = path.resolve(join(DEEBO_ROOT, "memory-bank", projectId, "progress.md"));
-      const progressLink = `file://${progressMdPath}`;
-      const motherLink = `file://${path.resolve(motherLogPath)}`;
+      const progressLink = `${progressMdPath}`;
+      const motherLink = `${path.resolve(motherLogPath)}`;
 
       // Build the pulse
       let pulse = hintText;
       pulse += `=== Deebo Session Pulse: ${sessionId} ===\n`;
-      pulse += `Timestamp: ${new Date().toISOString()}\n`;
+      
+      // Replace the timestamp line with formatted date
+      const now = new Date();
+      const formattedDate = now.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric', 
+        year: 'numeric'
+      });
+      const formattedTime = now.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      }).toLowerCase();
+      
+      pulse += `${formattedDate} | ${formattedTime}\n`;
       pulse += `Overall Status: ${status}\n`;
-      pulse += `Session Duration: ${Math.floor(durationMs / 1000)}s\n\n`;
+      pulse += `Session Duration: ${durationStr}\n\n`;
 
       pulse += `--- Mother Agent ---\n`;
       pulse += `Status: ${status === 'in_progress' ? 'working' : status}\n`;
-      pulse += `Last Activity: ${lastValidEvent ? lastValidEvent.timestamp : 'N/A'}\n`;
-      pulse += `Progress Log: ${progressLink}\n`;
-      
+      // Calculate time elapsed for last activity
+      const lastActivityTime = lastValidEvent ? Math.floor((Date.now() - new Date(lastValidEvent.timestamp).getTime()) / 1000) : 0;
+      const lastActivityMinutes = Math.floor(lastActivityTime / 60);
+      const lastActivitySeconds = lastActivityTime % 60;
+      const lastActivityStr = lastValidEvent 
+        ? lastActivityMinutes > 0 
+          ? `${lastActivityMinutes} minute${lastActivityMinutes > 1 ? 's' : ''} ${lastActivitySeconds} second${lastActivitySeconds !== 1 ? 's' : ''} ago`
+          : `${lastActivitySeconds} second${lastActivitySeconds !== 1 ? 's' : ''} ago`
+        : 'N/A';
+      pulse += `Last Activity: ${lastActivityStr}\n`;
+
+      pulse += `${motherLink}\n`;
       if (status === 'completed') {
-        pulse += `Mother Log: ${motherLink}\n\n`;
+        //pulse += `Solutions log: ${progressLink}\n\n`;
         if (solutionContent) {
-          pulse += `MOTHER SOLUTION:\n`;
           pulse += `<<<<<<< SOLUTION\n`;
           pulse += solutionContent + '\n';
           pulse += `======= SOLUTION END >>>>>>>\n\n`;
@@ -428,8 +442,20 @@ server.tool(
           }
         }
 
-        pulse += `* Scenario: ${scenarioId}\n`;
-        pulse += `  Status: Reported\n`;
+        // For reported scenarios, calculate runtime until report time
+        const firstEvent = JSON.parse(scenarioLines[0]);
+        const lastEvent = JSON.parse(scenarioLines[scenarioLines.length - 1]);
+        const runtimeSeconds = Math.floor((new Date(lastEvent.timestamp).getTime() - new Date(firstEvent.timestamp).getTime()) / 1000);
+        const minutes = Math.floor(runtimeSeconds / 60);
+        const seconds = runtimeSeconds % 60;
+        const runtimeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
+        pulse += `* ${scenarioId} [${runtimeStr}]\n`;
+        pulse += `  ${status === 'completed' ? (reportFiles.includes(`${scenarioId}.json`) ? 'Reported' : 'Crashed') : 'Reported'}\n`;
+        if (status !== 'completed') {
+          // Show the full hypothesis text, matching completed output
+          pulse += `  HYPOTHESIS: ${hypothesis}\n\n`;
+        }
 
         if (status === 'completed') {
           // Show summary for completed scenarios in completed sessions
@@ -463,7 +489,6 @@ server.tool(
               }
             }
             
-            pulse += `  Outcome Summary:\n`;
             pulse += `  <<<<<<< OUTCOME ${scenarioId}\n`;
             pulse += `  HYPOTHESIS: ${hypothesis}\n\n`;
             pulse += `  CONFIRMED: ${confirmed}\n\n`;
@@ -471,14 +496,14 @@ server.tool(
               pulse += `  INVESTIGATION:\n`;
               pulse += `  ${investigationLines.join('\n  ')}\n`;
             }
-            pulse += `  ======= OUTCOME ${scenarioId} END >>>>>>>\n`;
           } catch (e) {
             const error = e as Error;
             pulse += `  Error reading report: ${error.message}\n`;
           }
         }
 
-        pulse += `  (Full report: file://${path.resolve(join(reportsDir, `${scenarioId}.json`))})\n\n`;
+        pulse += `  ---------------------------------------------------------------------------\n`;
+        pulse += `  ${path.resolve(join(reportsDir, `${scenarioId}.json`))}\n\n`;
       }
 
       // Process unreported scenarios (either running or terminated without report)
@@ -518,14 +543,19 @@ server.tool(
             }
           }
 
-          // Calculate runtime and add to pulse
-          const runtime = Math.floor((Date.now() - new Date(firstEvent.timestamp).getTime()) / 1000);
-          pulse += `* Scenario: ${scenarioId}\n`;
-          pulse += `  Status: ${getScenarioStatus(scenarioId, pidMapping)}\n`;
-          pulse += `  Hypothesis: "${hypothesis}"\n`;
-          pulse += `  Runtime: ${runtime}s\n`;
+          // Calculate runtime in MM:SS format
+          const runtimeSeconds = Math.floor((Date.now() - new Date(firstEvent.timestamp).getTime()) / 1000);
+          const minutes = Math.floor(runtimeSeconds / 60);
+          const seconds = runtimeSeconds % 60;
+          const runtimeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
+          pulse += `* ${scenarioId} [${runtimeStr}]\n`;
+          pulse += `  ${status === 'completed' ? 'Crashed' : 'Investigating...'}\n`;
+          // Show the full hypothesis text
+          pulse += `  HYPOTHESIS: ${hypothesis}\n\n`;
           pulse += `  Latest Activity: ${lastEvent.message}\n`;
-          pulse += `  (Log: file://${path.resolve(join(logsDir, file))})\n\n`;
+          pulse += `  ---------------------------------------------------------------------------\n`;
+          pulse += `  ${path.resolve(join(logsDir, file))}\n\n`;
         } catch (e) {
           // Skip scenarios with invalid JSON
           continue;
@@ -538,7 +568,7 @@ server.tool(
         pulse += `\n=======================================\n`;
         pulse += `Not the result you were looking for?\n`;
         pulse += `Start another session and guide Deebo with what you learned!\n`;
-        pulse += `Need a refresher? Check out the Deebo GitHub:\n`;
+        pulse += `Need a refresher? Ask your agent to read Deebo Guide, or check out the GitHub:\n`;
         pulse += `https://github.com/snagasuri/deebo-prototype\n`;
         pulse += `=======================================\n`;
       }

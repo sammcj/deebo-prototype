@@ -3,6 +3,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { access, readFile } from 'fs/promises';
 import { simpleGit as createGit } from 'simple-git';
+import { execSync } from 'child_process';
 
 export const nodeVersionCheck: SystemCheck = {
   name: 'Node.js Version',
@@ -72,8 +73,16 @@ export const mcpToolsCheck: SystemCheck = {
     // Check desktop-commander
     if (process.platform === 'win32') {
       // On Windows, check for the .cmd shim which is required for proper stdin/stdout handling
-      const base = process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming');
-      const cmdPath = join(base, 'npm', 'desktop-commander.cmd');
+      // Use actual npm prefix instead of assuming %APPDATA%\npm for nvm compatibility
+      let cmdPath: string;
+      try {
+        const npmPrefix = execSync('npm config get prefix').toString().trim();
+        cmdPath = join(npmPrefix, 'desktop-commander.cmd');
+      } catch {
+        // Fallback to traditional roaming path if npm command fails
+        const base = process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming');
+        cmdPath = join(base, 'npm', 'desktop-commander.cmd');
+      }
       try {
         await access(cmdPath);
         results.push({
@@ -293,7 +302,19 @@ export const toolPathsCheck: SystemCheck = {
         : hasFails 
           ? 'Some required tools missing'
           : 'Tools found but some paths may need attention',
-      details: results.map(r => `${r.name}: ${r.message}\n  ${r.details || ''}`).join('\n\n')
+      details: results.map(r => `${r.name}: ${r.message}\n  ${r.details || ''}`).join('\n\n') + `\n\nTroubleshooting Tips:
+1. If deebo is failing at runtime (when starting a session), it's likely the system cannot find paths for MCP tools (git-mcp and desktopCommander). Run 'where uvx' to verify uvx is in your PATH.
+
+2. If this check says "unable to find tool paths" even after installation:
+   - Make sure to add the uvx/node paths to your environment
+   - On Windows, check if uvx.exe is in your PATH by running 'where uvx'
+   - Try closing and reopening your terminal to refresh environment variables
+
+3. If deebo fails in the middle of a run after spawning scenario agents:
+   - Don't worry! This is not a critical failure
+   - You can always start a new deebo session
+   - Tell it to look at its memory bank from the previous run
+   - The memory bank contains all the progress and findings so far`
     };
   }
 };
@@ -462,11 +483,116 @@ export const apiKeysCheck: SystemCheck = {
   }
 };
 
+export const guideServerCheck: SystemCheck = {
+  name: 'Guide Server',
+  async check(config: DoctorConfig) {
+    const home = homedir();
+    const deeboGuidePath = join(home, '.deebo-guide'); // Changed to .deebo-guide
+    const results: CheckResult[] = [];
+
+    // Check guide server files
+    const guidePath = join(deeboGuidePath, 'deebo_guide.md'); // Changed to deeboGuidePath
+    const serverPath = join(deeboGuidePath, 'guide-server.js'); // Changed to deeboGuidePath
+
+    try {
+      await access(guidePath);
+      results.push({
+        name: 'guide_file',
+        status: 'pass',
+        message: 'Deebo guide file found',
+        details: `Path: ${guidePath}`
+      });
+    } catch {
+      results.push({
+        name: 'guide_file',
+        status: 'fail',
+        message: 'Deebo guide file not found',
+        details: `Expected at: ${guidePath}`
+      });
+    }
+
+    try {
+      await access(serverPath);
+      results.push({
+        name: 'server_file',
+        status: 'pass',
+        message: 'Guide server file found',
+        details: `Path: ${serverPath}`
+      });
+    } catch {
+      results.push({
+        name: 'server_file',
+        status: 'fail',
+        message: 'Guide server file not found',
+        details: `Expected at: ${serverPath}`
+      });
+    }
+
+    // Check MCP configurations
+    const isWindows = process.platform === 'win32';
+    const configPaths = isWindows ? {
+      cline: join(process.env.APPDATA || '', 'Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json'),
+      claude: join(process.env.APPDATA || '', 'Claude/claude_desktop_config.json'),
+      cursor: join(process.env.APPDATA || '', '.cursor/mcp.json')
+    } : {
+      cline: join(home, 'Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json'),
+      claude: join(home, 'Library/Application Support/Claude/claude_desktop_config.json'),
+      cursor: join(home, '.cursor/mcp.json')
+    };
+
+    for (const [name, path] of Object.entries(configPaths)) {
+      try {
+        const content = await readFile(path, 'utf8');
+        const config = JSON.parse(content);
+        const guideServer = config.mcpServers?.['deebo-guide'];
+
+        if (!guideServer) {
+          results.push({
+            name: `${name}_config`,
+            status: 'fail',
+            message: `Guide server not configured in ${name}`,
+            details: `Path: ${path}\nMissing 'deebo-guide' in mcpServers`
+          });
+          continue;
+        }
+
+        results.push({
+          name: `${name}_config`,
+          status: 'pass',
+          message: `Guide server properly configured in ${name}`,
+          details: `Path: ${path}`
+        });
+      } catch {
+        results.push({
+          name: `${name}_config`,
+          status: 'fail',
+          message: `Could not read ${name} config`,
+          details: `Expected at: ${path}`
+        });
+      }
+    }
+
+    // Aggregate results
+    const allPass = results.every(r => r.status === 'pass');
+    const hasFails = results.some(r => r.status === 'fail');
+
+    return {
+      name: 'Guide Server',
+      status: allPass ? 'pass' : hasFails ? 'fail' : 'warn',
+      message: allPass 
+        ? 'Guide server files and configuration valid' 
+        : 'Guide server setup incomplete',
+      details: results.map(r => `${r.name}: ${r.message}\n${r.details || ''}`).join('\n\n')
+    };
+  }
+};
+
 export const allChecks = [
   nodeVersionCheck,
   gitCheck,
   toolPathsCheck,
   mcpToolsCheck,
   configFilesCheck,
-  apiKeysCheck
+  apiKeysCheck,
+  guideServerCheck
 ];

@@ -18,11 +18,21 @@ npx deebo-setup@latest
 <details>
 <summary> Manual Configuration </summary>
 
-After installing with deebo-setup, create a configuration file at your coding agent's specified location with the following content:
+After installing with deebo-setup, create a configuration file at your coding agent's specified location with the following content. First, add the guide server (which provides help documentation even if the main installation fails):
 
 ```json
 {
   "servers": {
+    "deebo-guide": {
+      "command": "node",
+      "args": [
+        "--experimental-specifier-resolution=node",
+        "--experimental-modules",
+        "/Users/[your-name]/.deebo/guide-server.js"
+      ],
+      "env": {},
+      "transportType": "stdio"
+    },
     "deebo": {
       "command": "node",
       "args": [
@@ -118,7 +128,7 @@ We're piloting enterprise features that unlock unprecedented productivity gains 
 ---
 [Watch the full work session with Cline + Deebo here (3 mins, sped up)](https://drive.google.com/file/d/141VdQ9DNOfnOpP_mmB0UPMr8cwAGrxKC/view)
 
-<video src="https://github.com/user-attachments/assets/756d35b4-4f77-48de-bd1a-86f76360279e" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/a580ed7e-7f21-45db-91c6-2db1d3a1a174" controls width="100%"></video>
 
 ## License
 

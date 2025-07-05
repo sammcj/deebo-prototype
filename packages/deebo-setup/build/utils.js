@@ -24,7 +24,7 @@ export async function checkPrerequisites() {
     catch {
         throw new Error('git is required but not found');
     }
-    // Check ripgrep
+    // Check ripgrep and install desktopCommander
     const platform = process.platform;
     try {
         const { execSync } = await import('child_process');
@@ -125,6 +125,23 @@ export async function checkPrerequisites() {
         }
         console.log(chalk.yellow('⚠ Could not check for uvx'));
         throw new Error('Failed to check for uvx installation');
+    }
+    // Install desktopCommander globally on Windows for proper .cmd shim
+    if (platform === 'win32') {
+        try {
+            const { execSync } = await import('child_process');
+            try {
+                execSync('npm install -g @wonderwhy-er/desktop-commander', { stdio: 'inherit' });
+                console.log(chalk.green('✔ Installed desktopCommander globally'));
+            }
+            catch {
+                console.log(chalk.yellow('\nAutomatic desktopCommander installation failed.'));
+                console.log('Please install manually: npm install -g @wonderwhy-er/desktop-commander');
+            }
+        }
+        catch (error) {
+            console.log(chalk.yellow('⚠ Could not install desktopCommander'));
+        }
     }
 }
 export async function findConfigPaths() {
@@ -432,16 +449,20 @@ export async function updateMcpConfig(config) {
             catch {
                 // File doesn't exist or is empty, use empty object
             }
-            // Add MCP settings
-            const mcpSettings = settings;
-            mcpSettings.mcp = mcpSettings.mcp || {};
-            mcpSettings.mcp.servers = mcpSettings.mcp.servers || {};
-            mcpSettings.mcp.servers.deebo = serverConfig;
-            mcpSettings['chat.mcp.enabled'] = true;
+            // Add MCP settings while preserving existing settings
+            const existingSettings = settings;
+            existingSettings.mcp = existingSettings.mcp || {};
+            existingSettings.mcp.servers = existingSettings.mcp.servers || {};
+            existingSettings.mcp.servers.deebo = serverConfig;
+            existingSettings['chat.mcp.enabled'] = true;
+            // Write settings file with merged settings
+            const mergedSettings = {
+                ...existingSettings
+            };
             // Create parent directory if it doesn't exist
             await mkdir(dirname(config.vscodePath), { recursive: true });
-            // Write settings file
-            await writeFile(config.vscodePath, JSON.stringify(mcpSettings, null, 2));
+            // Write settings file with merged settings
+            await writeFile(config.vscodePath, JSON.stringify(mergedSettings, null, 2));
             console.log(chalk.green('✔ Updated VS Code settings'));
             console.log(chalk.dim(`  Settings file: ${config.vscodePath}`));
         }
